@@ -6,6 +6,8 @@ ComfyUI 交互式提示词/标签编辑节点，可选本地翻译功能，由�
 
 基于新版 `comfy_api.latest` / `ComfyExtension`（V3）节点 API 构建，需要较新版本的 ComfyUI。
 
+![](example.png)
+
 ## 功能特性
 
 - 提示词输入框与标签 chips 双向同步（逗号分隔）
