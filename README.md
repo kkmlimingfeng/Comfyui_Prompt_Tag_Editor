@@ -6,6 +6,8 @@ Interactive prompt/tag editor node for ComfyUI, with optional local translation 
 
 Built on the modern `comfy_api.latest` / `ComfyExtension` (V3) node API — requires a recent ComfyUI.
 
+![](example.png)
+
 ## Features
 
 - Prompt textarea kept in sync with tag chips (comma-separated)
