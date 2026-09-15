@@ -1,0 +1,11 @@
+# Requires a CUDA-enabled llama-cpp-python build for GPU offload.
+#
+# The plugin itself does not force-install llama-cpp-python (it is imported
+# lazily; a CPU-only build also works, just slower).
+#
+# Recommended: prebuilt CUDA wheels for common CUDA/Python combos:
+#   https://github.com/JamePeng/llama-cpp-python/releases
+#   pip install llama_cpp_python-<version>+cu128-cp312-cp312-win_amd64.whl
+#
+# Alternative (official wheel index):
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu128

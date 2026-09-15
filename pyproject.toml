@@ -1,0 +1,16 @@
+[project]
+name = "comfyui-prompt-tag-editor"
+description = "Interactive prompt tag editor: tag chips with hover weight/delete, double-click edit, long-press drag reorder, plus Tencent Hy-MT2-1.8B GGUF translation."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/kkmlimingfeng/Comfyui_Prompt_Tag_Editor"
+Issues = "https://github.com/kkmlimingfeng/Comfyui_Prompt_Tag_Editor/issues"
+
+[tool.comfy]
+PublisherId = "kkmlimingfeng"
+DisplayName = "Prompt Tag Editor"
+Icon = ""
+Tags = ["prompt", "tags", "translation", "text"]
