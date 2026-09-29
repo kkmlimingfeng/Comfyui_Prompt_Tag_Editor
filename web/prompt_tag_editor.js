@@ -29,10 +29,12 @@ const STYLE = `
   min-height:24px; padding:2px 7px; box-sizing:border-box;
   border:1px solid var(--border-color,#666); border-radius:4px;
   background:var(--comfy-input-bg,#303030); color:var(--input-text,#ddd);
-  cursor:grab; user-select:none; font-size:13px; }
+  cursor:grab; user-select:none; font-size:13px; touch-action:none; }
 .pte-tag:hover { filter:brightness(1.25); border-color:var(--input-text,#999); z-index:10000; }
 .pte-tag.pte-missing { opacity:.45; border-style:dashed; }
-.pte-tag.pte-dragging { opacity:.35; }
+.pte-tag.pte-dragging { opacity:.35; cursor:grabbing; }
+.pte-tag.pte-disabled { opacity:.5; filter:grayscale(.9);
+  border-style:dashed; text-decoration:line-through; }
 /* Keep popups out of the way while a drag is in progress. */
 .pte-tag.pte-dragging .pte-pop,
 .pte-root.pte-drag-active .pte-pop { display:none !important; }
@@ -63,6 +65,7 @@ const STYLE = `
 .pte-pop button { background:var(--comfy-input-bg,#333); color:var(--input-text,#ddd);
   border:1px solid var(--border-color,#555); border-radius:3px; cursor:pointer; }
 .pte-status { font-size:11px; opacity:.6; margin-top:5px; min-height:14px; }
+.pte-hint { font-size:11px; opacity:.5; margin-top:3px; }
 `;
 
 const LANGS = [
@@ -119,20 +122,34 @@ function parseTag(text) {
     weight = 1.1;
   }
 
-  return { id: uid(), text: body, translation: "", weight };
+  return { id: uid(), text: body, translation: "", weight, disabled: false };
 }
 
 function serialize(tags) {
   return tags.map(t => {
     const s = (t.text || "").trim();
-    if (!s) return "";
+    if (!s || t.disabled) return "";
     const w = Number(t.weight ?? 1);
     return Math.abs(w - 1) < 1e-6 ? s : `(${s}:${w.toFixed(2).replace(/0+$/,"").replace(/\.$/,"")})`;
   }).filter(Boolean).join(", ");
 }
 
 function serializeTranslations(tags) {
-  return tags.map(t => (t.translation || "").trim()).filter(Boolean).join(", ");
+  return tags.filter(t => !t.disabled)
+    .map(t => (t.translation || "").trim())
+    .filter(Boolean).join(", ");
+}
+
+// If the raw text ends with a comma (at bracket depth 0), keep a ", " at the
+// end so the user can directly continue typing the next tag.
+function trailingSeparator(raw) {
+  if (!/,\s*$/.test(raw || "")) return "";
+  let depth = 0;
+  for (const ch of raw) {
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth = Math.max(0, depth - 1);
+  }
+  return depth === 0 ? ", " : "";
 }
 
 function installStyle() {
@@ -157,90 +174,146 @@ function hideWidget(node, name) {
 function createTag(node, tag, index, translated) {
   const el = document.createElement("div");
   el.className = "pte-tag";
+  el.dataset.index = String(index);
+  el.dataset.uid = tag.id;
   const label = translated ? (tag.translation || tag.text) : tag.text;
   const missing = translated && !(tag.translation || "").trim();
   if (missing) el.classList.add("pte-missing");
+  if (tag.disabled) el.classList.add("pte-disabled");
   el.textContent = label;
   el.title = missing ? "未翻译" : label;
 
-  let holdTimer = null;
+  const pte = node.__pte;
+
+  // Pointer-based reordering: press a tag and move — dragging starts right
+  // away (no long-press wait). A release without movement is a plain click,
+  // which toggles the tag's disabled state.
+  let pointerId = null;
+  let dragging = false;
   let startX = 0;
   let startY = 0;
+  let dropTarget = null; // {index, before} or {append: true}
 
-  // Long-press (~350ms) enables dragging.
+  const clearIndicators = () => {
+    pte.root.querySelectorAll(".pte-insert-left, .pte-insert-right")
+      .forEach(el2 => el2.classList.remove("pte-insert-left", "pte-insert-right"));
+  };
+
+  // Locate the drop position by scanning tags in visual order: rows fully
+  // above the pointer are passed (fallback = after the row's last tag); the
+  // row containing the pointer is split left/right at each tag's midpoint.
+  const updateDropTarget = (x, y) => {
+    dropTarget = null;
+    clearIndicators();
+    for (const box of [pte.original, pte.translated]) {
+      const br = box.getBoundingClientRect();
+      if (x < br.left || x > br.right || y < br.top - 6 || y > br.bottom + 6) continue;
+
+      let idx = null;
+      let before = false;
+      let fallback = null;
+      for (const t of box.querySelectorAll(".pte-tag")) {
+        if (t === el) continue;
+        const r = t.getBoundingClientRect();
+        if (y > r.bottom + 4) {
+          fallback = Number(t.dataset.index);
+          continue;
+        }
+        if (y < r.top - 4) {
+          idx = Number(t.dataset.index);
+          before = true;
+          break;
+        }
+        if (x < r.left + r.width / 2) {
+          idx = Number(t.dataset.index);
+          before = true;
+          break;
+        }
+        fallback = Number(t.dataset.index);
+      }
+      if (idx === null && fallback !== null) {
+        idx = fallback;
+        before = false;
+      }
+      if (idx === null) {
+        dropTarget = { append: true };
+      } else {
+        dropTarget = { index: idx, before };
+        const target = box.querySelector(`.pte-tag[data-index="${idx}"]`);
+        if (target) target.classList.add(before ? "pte-insert-left" : "pte-insert-right");
+      }
+      return;
+    }
+  };
+
+  const endDrag = (cancel) => {
+    if (!dragging) return;
+    dragging = false;
+    el.classList.remove("pte-dragging");
+    pte.root.classList.remove("pte-drag-active");
+    clearIndicators();
+    const from = pte.dragIndex;
+    if (!cancel && dropTarget && Number.isInteger(from)) {
+      let to;
+      if (dropTarget.append) {
+        to = pte.tags.length - 1;
+      } else {
+        to = dropTarget.before ? dropTarget.index : dropTarget.index + 1;
+        if (from < to) to -= 1;
+      }
+      if (to !== from && to >= 0) {
+        const [item] = pte.tags.splice(from, 1);
+        pte.tags.splice(to, 0, item);
+        pte.render();
+      }
+    }
+    pte.dragIndex = null;
+    dropTarget = null;
+  };
+
   el.addEventListener("pointerdown", e => {
     if (e.button !== 0) return;
     startX = e.clientX;
     startY = e.clientY;
-    holdTimer = setTimeout(() => {
-      holdTimer = null;
-      el.draggable = true;
-      el.classList.add("pte-dragging");
-    }, 350);
+    pointerId = e.pointerId;
+    el.setPointerCapture(e.pointerId);
   });
 
-  const clearHold = () => {
-    if (holdTimer) clearTimeout(holdTimer);
-    holdTimer = null;
-  };
-  el.addEventListener("pointerup", clearHold);
-  el.addEventListener("pointercancel", clearHold);
   el.addEventListener("pointermove", e => {
-    if (!holdTimer) return;
-    if (Math.hypot(e.clientX - startX, e.clientY - startY) > 6) clearHold();
-  });
-
-  el.addEventListener("dragstart", e => {
-    e.dataTransfer.setData("text/plain", String(index));
-    e.dataTransfer.effectAllowed = "move";
-    node.__pte.dragIndex = index;
-    node.__pte.root.classList.add("pte-drag-active");
-  });
-
-  const clearIndicators = () => {
-    node.__pte.root.querySelectorAll(".pte-insert-left, .pte-insert-right")
-      .forEach(el2 => el2.classList.remove("pte-insert-left", "pte-insert-right"));
-  };
-
-  el.addEventListener("dragover", e => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    const rect = el.getBoundingClientRect();
-    const before = e.clientX < rect.left + rect.width / 2;
-    el.classList.toggle("pte-insert-left", before);
-    el.classList.toggle("pte-insert-right", !before);
-  });
-
-  el.addEventListener("dragleave", () => {
-    el.classList.remove("pte-insert-left", "pte-insert-right");
-  });
-
-  el.addEventListener("drop", e => {
-    e.preventDefault();
-    e.stopPropagation();
-    clearIndicators();
-    const from = node.__pte.dragIndex ?? Number(e.dataTransfer.getData("text/plain"));
-    if (!Number.isInteger(from) || from < 0) return;
-
-    const rect = el.getBoundingClientRect();
-    const before = e.clientX < rect.left + rect.width / 2;
-    let to = before ? index : index + 1;
-    if (from < to) to -= 1;
-
-    const tags = node.__pte.tags;
-    if (to !== from) {
-      const [item] = tags.splice(from, 1);
-      tags.splice(to, 0, item);
+    if (e.pointerId !== pointerId) return;
+    if (!dragging) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return;
+      dragging = true;
+      pte.dragIndex = index;
+      el.classList.add("pte-dragging");
+      pte.root.classList.add("pte-drag-active");
     }
-    node.__pte.render();
+    e.preventDefault();
+    updateDropTarget(e.clientX, e.clientY);
   });
 
-  el.addEventListener("dragend", () => {
-    el.draggable = false;
-    el.classList.remove("pte-dragging");
-    clearIndicators();
-    node.__pte.root.classList.remove("pte-drag-active");
-    node.__pte.dragIndex = null;
+  el.addEventListener("pointerup", e => {
+    if (e.pointerId !== pointerId) return;
+    pointerId = null;
+    if (dragging) { endDrag(false); return; }
+    if (e.button !== 0) return;
+    if (Math.hypot(e.clientX - startX, e.clientY - startY) > 6) return;
+
+    // Plain click: toggle the disabled state. The twin element in the other
+    // box is updated in place (no re-render) so a fast double-click still
+    // lands on the same element and the edit prompt keeps working.
+    tag.disabled = !tag.disabled;
+    for (const box of [pte.original, pte.translated]) {
+      const twin = box.querySelector(`.pte-tag[data-uid="${tag.id}"]`);
+      if (twin) twin.classList.toggle("pte-disabled", !!tag.disabled);
+    }
+    pte.syncText();
+  });
+
+  el.addEventListener("pointercancel", e => {
+    if (e.pointerId !== pointerId) return;
+    pointerId = null;
+    endDrag(true);
   });
 
   // Hover popup: tag text + weight + delete. Flip above when near the bottom.
@@ -267,7 +340,7 @@ function createTag(node, tag, index, translated) {
 
   // Interactions inside the popup must not reach the tag itself:
   // dblclick would open the edit prompt (e.g. double-clicking the spinner
-  // arrows), pointerdown would arm the long-press drag.
+  // arrows), pointerdown would start the press/drag tracking.
   pop.addEventListener("dblclick", e => e.stopPropagation());
   pop.addEventListener("pointerdown", e => e.stopPropagation());
 
@@ -307,6 +380,7 @@ function build(node) {
   const nativePrompt = hideWidget(node, "prompt");
   const nativeLang = hideWidget(node, "target_language");
   const nativeTranslated = hideWidget(node, "translated_prompt");
+  const nativeState = hideWidget(node, "tags_state");
 
   const root = document.createElement("div");
   root.className = "pte-root";
@@ -330,6 +404,7 @@ function build(node) {
       </div>
       <div class="pte-box pte-translated"></div>
       <div class="pte-status"></div>
+      <div class="pte-hint">悬停：权重 / 删除 · 拖动：排序 · 单击：停用 / 启用 · 双击：编辑</div>
     </div>
   `;
 
@@ -394,15 +469,33 @@ function build(node) {
   // Push current tags/translations into the native (hidden) value widgets.
   // Writing .value goes through the widget's own setter, which updates the
   // frontend widget store (options.setValue) used by queue/save.
+  const tagsStateJson = () => JSON.stringify(state.tags.map(t => ({
+    text: t.text || "",
+    translation: t.translation || "",
+    weight: Number(t.weight) || 1,
+    disabled: !!t.disabled,
+  })));
+
   state.syncText = () => {
-    const text = serialize(state.tags);
+    const base = serialize(state.tags);
+    const text = base + trailingSeparator(state.prompt.value);
     if (state.prompt.value !== text) {
       state.suppressInput = true;
       state.prompt.value = text;
       state.suppressInput = false;
     }
-    if (nativePrompt) nativePrompt.value = text;
+    if (nativePrompt) nativePrompt.value = base;
     if (nativeTranslated) nativeTranslated.value = serializeTranslations(state.tags);
+    if (nativeState) nativeState.value = tagsStateJson();
+  };
+
+  // Rebuild tags from textarea text while keeping disabled tags (which are
+  // not part of the text anymore). Re-typing the same text re-enables it.
+  state.rebuildFromText = (text) => {
+    const parsed = parsePrompt(text);
+    const kept = state.tags.filter(t =>
+      t.disabled && !parsed.some(p => p.text === (t.text || "").trim()));
+    state.tags = parsed.concat(kept);
   };
 
   state.render = (opts = {}) => {
@@ -415,9 +508,12 @@ function build(node) {
     });
 
     if (opts.keepRaw) {
-      // Keep the textarea exactly as typed; only push values to hidden widgets.
-      if (nativePrompt) nativePrompt.value = state.prompt.value;
+      // Keep the textarea exactly as typed; only push values to hidden
+      // widgets (the prompt widget gets the canonical serialized text so
+      // save/load stays consistent even with a trailing comma mid-typing).
+      if (nativePrompt) nativePrompt.value = serialize(state.tags);
       if (nativeTranslated) nativeTranslated.value = serializeTranslations(state.tags);
+      if (nativeState) nativeState.value = tagsStateJson();
     } else {
       state.syncText();
     }
@@ -500,7 +596,7 @@ function build(node) {
         state.autoPending = true;
         return;
       }
-      const hasMissing = state.tags.some(t => !(t.translation || "").trim());
+      const hasMissing = state.tags.some(t => !t.disabled && !(t.translation || "").trim());
       if (hasMissing) doTranslate();
     }, delay);
   };
@@ -520,7 +616,7 @@ function build(node) {
   // Typing keeps raw text (no cursor fighting); tag ops rebuild everything.
   state.prompt.addEventListener("input", () => {
     if (state.suppressInput) return;
-    state.tags = parsePrompt(state.prompt.value);
+    state.rebuildFromText(state.prompt.value);
     state.render({ keepRaw: true });
     scheduleAuto(900);
   });
@@ -529,39 +625,46 @@ function build(node) {
   if (nativePrompt) {
     nativePrompt.callback = (v) => {
       const text = String(v ?? "");
-      if (state.prompt.value === text) return;
+      // Assigning the native widget's value echoes back through this
+      // callback. Ignore echoes describing the tags we already have (e.g.
+      // the canonical text pushed while typing), otherwise the rewrite
+      // would eat spaces/trailing commas mid-edit.
+      if (serialize(parsePrompt(text)) === serialize(state.tags)) return;
       state.suppressInput = true;
       state.prompt.value = text;
       state.suppressInput = false;
-      state.tags = parsePrompt(text);
+      state.rebuildFromText(text);
       state.render();
       scheduleAuto(900);
     };
   }
 
-  // Allow dropping into the empty padding of a tags box (moves to end).
-  for (const box of [state.original, state.translated]) {
-    box.addEventListener("dragover", e => e.preventDefault());
-    box.addEventListener("drop", e => {
-      if (e.target !== box) return;
-      e.preventDefault();
-      const from = state.dragIndex;
-      if (!Number.isInteger(from)) return;
-      const [item] = state.tags.splice(from, 1);
-      state.tags.push(item);
-      state.render();
-    });
-  }
-
   // Initial sync from the native widgets + re-sync after workflow loads.
   const resyncFromNative = () => {
-    if (nativePrompt) {
-      const text = String(nativePrompt.value ?? "");
-      state.suppressInput = true;
-      state.prompt.value = text;
-      state.suppressInput = false;
+    const text = String(nativePrompt?.value ?? "");
+    let saved = null;
+    try { saved = JSON.parse(nativeState?.value || "null"); } catch (err) { saved = null; }
+
+    if (Array.isArray(saved) &&
+        serialize(saved.filter(t => t && !t.disabled)) === serialize(parsePrompt(text))) {
+      // tags_state matches the prompt text: restore the full editor state
+      // (order, weights, translations and disabled flags).
+      state.tags = saved
+        .filter(t => t && typeof t === "object")
+        .map(t => ({
+          id: uid(),
+          text: String(t.text ?? ""),
+          translation: String(t.translation ?? ""),
+          weight: Number(t.weight) || 1,
+          disabled: !!t.disabled,
+        }));
+    } else {
+      // External/legacy prompt text: parse it fresh.
       state.tags = parsePrompt(text);
     }
+    state.suppressInput = true;
+    state.prompt.value = text;
+    state.suppressInput = false;
     if (nativeLang && nativeLang.value) state.lang.value = nativeLang.value;
     state.render();
     scheduleAuto(1200);

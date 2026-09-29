@@ -6,14 +6,14 @@ Interactive prompt/tag editor node for ComfyUI, with optional local translation 
 
 Built on the modern `comfy_api.latest` / `ComfyExtension` (V3) node API — requires a recent ComfyUI.
 
-![](example.png)
-
 ## Features
 
 - Prompt textarea kept in sync with tag chips (comma-separated)
 - Tag chips with hover popup: adjust **weight** and **delete** without retyping
 - **Double-click** a chip to edit its text
-- **Long-press drag** (350 ms) to reorder tags
+- **Press-and-drag** to reorder tags (dragging starts immediately on movement)
+- **Single click** a chip to disable / re-enable it — disabled tags stay in the
+  list (grayed out) but are excluded from the prompt and outputs
 - Translated tag chips with per-language cache; untranslated chips shown dashed
 - **Auto-translate** toggle: missing translations are filled automatically after edits
 - 8 target languages: Chinese / Japanese / Korean / English / French / German / Spanish / Russian
@@ -25,7 +25,7 @@ Built on the modern `comfy_api.latest` / `ComfyExtension` (V3) node API — requ
 |---|---|
 | `Prompt` | Serialized prompt with weights, e.g. `(white dress:1.2), long hair` |
 | `Translated Prompt` | Comma-separated translations |
-| `Tags JSON` | Full tag list (text / translation / weight) as JSON |
+| `Tags JSON` | Full tag list (text / translation / weight / disabled) as JSON |
 
 ## Install
 

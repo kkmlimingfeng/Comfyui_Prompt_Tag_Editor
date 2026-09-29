@@ -47,6 +47,7 @@ def parse_tag(text):
         "text": body,
         "translation": "",
         "weight": weight,
+        "disabled": False,
     }
 
 
@@ -54,6 +55,9 @@ def serialize_prompt(tags):
     result = []
 
     for tag in tags:
+        if tag.get("disabled"):
+            continue
+
         text = str(tag.get("text", "")).strip()
         if not text:
             continue

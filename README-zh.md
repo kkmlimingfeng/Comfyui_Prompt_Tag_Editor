@@ -6,14 +6,13 @@ ComfyUI 交互式提示词/标签编辑节点，可选本地翻译功能，由�
 
 基于新版 `comfy_api.latest` / `ComfyExtension`（V3）节点 API 构建，需要较新版本的 ComfyUI。
 
-![](example.png)
-
 ## 功能特性
 
 - 提示词输入框与标签 chips 双向同步（逗号分隔）
 - 悬停标签弹出控制框：直接调整**权重**、**删除**，无需手动改文本
 - **双击** chip 编辑标签文本
-- **长按拖动**（350 ms）调整标签顺序
+- **按住拖动**即可调整标签顺序（移动即开始拖动，无需长按等待）
+- **单击** chip 停用 / 启用标签——停用后标签变灰保留在列表里，但不再进入提示词和输出
 - 翻译结果标签 chips，按语言缓存；未翻译项显示为虚线样式
 - **自动翻译**开关：编辑后自动补全缺失的翻译
 - 8 种目标语言：中文 / 日语 / 韩语 / 英语 / 法语 / 德语 / 西班牙语 / 俄语
@@ -25,7 +24,7 @@ ComfyUI 交互式提示词/标签编辑节点，可选本地翻译功能，由�
 |---|---|
 | `Prompt` | 带权重的序列化提示词，如 `(white dress:1.2), long hair` |
 | `Translated Prompt` | 逗号分隔的翻译结果 |
-| `Tags JSON` | 完整标签列表（text / translation / weight）的 JSON |
+| `Tags JSON` | 完整标签列表（text / translation / weight / disabled）的 JSON |
 
 ## 安装
 
