@@ -95,11 +95,12 @@ const STYLE = `
 .pte-fp-item .pte-fp-name { overflow:hidden; text-overflow:ellipsis; }
 .pte-fp-foot { padding:6px 10px; font-size:11px; opacity:.5;
   border-top:1px solid var(--border-color,#555); }
-/* Reserved preview area (min 220px like the official LoadImage widget).
-   The image is contained within it — scaled down to fit both axes, never
-   upscaled past natural size, centered — so resizing the node refits the
-   image instead of the image resizing the node. */
-.pte-fp-preview { flex:1 1 auto; min-height:220px; display:flex;
+/* Preview area: flexes to fill the slot below the path row (small floor so
+   the node can be shrunk hard). The image is contained within it — scaled
+   down to fit both axes, never upscaled past natural size, centered — so
+   resizing the node refits the image instead of the image resizing the
+   node, and the image can never spill past the node body. */
+.pte-fp-preview { flex:1 1 auto; min-height:48px; display:flex;
   align-items:center; justify-content:center; overflow:hidden; }
 .pte-fp-preview img { display:none; max-width:100%; max-height:100%;
   border:1px solid var(--border-color,#555); border-radius:6px;
@@ -423,10 +424,9 @@ function build(node) {
 
   const root = document.createElement("div");
   root.className = "pte-root";
-  // Layout: the prompt textarea is the ONLY flexible element (flex:1) and
-  // absorbs whatever height the node slot provides — drag the node's bottom
-  // edge and the textarea follows. Everything else lives in .pte-fixed at
-  // its natural (content) height, which also serves as the minimum.
+  // Layout: the prompt textarea is the ONLY flexible element (flex:1) — it
+  // absorbs the extra slot height when the node is dragged taller; the
+  // fixed block below keeps its content height regardless of node size.
   root.innerHTML = `
     <div class="pte-inner">
       <div class="pte-label">原始提示词</div>
@@ -453,25 +453,32 @@ function build(node) {
   const inner = root.querySelector(".pte-inner");
   const fixedEl = root.querySelector(".pte-fixed");
 
-  // Natural slot height = everything except the textarea's flexible part
-  // (fixed content + textarea at its 64px minimum + label margins/slack).
+  // Natural slot height = fixed content (tags/translation boxes + labels)
+  // plus the textarea at its min-height, plus label margins/slack.
   const naturalSlot = () => (fixedEl.offsetHeight || 0) + 96;
+
+  let overhead = 0;
 
   const widget = node.addDOMWidget?.("pte_editor", "PTE_EDITOR", root, {
     serialize: false,
     hideOnZoom: false,
-    // Slot height: never below the natural content height; otherwise follows
-    // the node's height (minus this node's fixed overhead) so the textarea
-    // flexes with node resizing. `overhead` is measured once below.
-    getMinHeight: () => Math.max(naturalSlot(), (node.size?.[1] ?? 0) - overhead),
-    getHeight: () => Math.max(naturalSlot(), (node.size?.[1] ?? 0) - overhead),
-    afterResize: () => fitNodeSize(true),
+    // PURE content height — getHeight must NEVER depend on node.size, not
+    // even through a cached "user slot": computeSize() calls back into
+    // getHeight, so any size-dependent return forms a ratchet
+    // (size → getHeight → computeSize → setSize → afterResize → size …)
+    // that inflates the node by the overhead error every cycle — the
+    // clone/reload blow-up. The frontend stretches the element to the REAL
+    // slot (h-full) regardless of what getHeight returns, so the textarea
+    // still flexes when the user drags the node taller; the extra height
+    // itself persists via the workflow's saved node.size.
+    getMinHeight: () => naturalSlot(),
+    getHeight: () => naturalSlot(),
   });
   if (widget) widget.serialize = false;
 
   // Header + hidden widgets + layout margins: measure once at build time
-  // while the panel is still at its natural height.
-  let overhead = 0;
+  // (single-shot, only used by the grow-only fitter below — never feeds
+  // back into getHeight).
   overhead = Math.max(0,
     ((node.computeSize?.([node.size?.[0] ?? 420, 100])?.[1] ?? 0)) - naturalSlot());
 
@@ -496,19 +503,52 @@ function build(node) {
 
   const state = node.__pte;
 
-  // Keep the node height in sync with the DOM content. Grow-only: never
-  // snap the node back down — shrinking is the user's job (dragging the
-  // node edge), and the textarea absorbs the difference via flex.
-  let fitPending = false;
+  // Grow-only content fit. Two guards against the load/clone inflation:
+  // (1) width must be stable across a frame before any fit — right after
+  // attachment the container can briefly be narrow, wrapping every tag
+  // onto its own line;
+  // (2) a big single jump (>120px — a legit edit adds one ~28px row) is
+  // only committed after a settle delay re-measures the SAME value. A
+  // transient wrapped layout converges to the unwrapped height and the
+  // jump never happens; genuinely tall content passes unchanged.
+  let lastFitWidth = -1;
+  let fitRaf = 0;
+  let fitConfirmTimer = 0;
+  let lastConfirmedWant = 0;
   const fitNodeSize = () => {
     if (!node.graph || !node.size) return;
-    const cs = node.computeSize?.([...node.size]);
-    if (!cs) return;
-    const h = Math.max(cs[1], 160);
-    if (h > node.size[1] + 2) {
-      node.setSize?.([node.size[0], h]);
-      node.setDirtyCanvas?.(true, true);
+    const w = fixedEl.clientWidth;
+    if (!w) return; // not attached / not laid out yet
+    if (w !== lastFitWidth) {
+      lastFitWidth = w;
+      cancelAnimationFrame(fitRaf);
+      fitRaf = requestAnimationFrame(() => {
+        fitRaf = 0;
+        fitNodeSize();
+      });
+      return; // width still settling — re-check next frame
     }
+    const want = naturalSlot() + overhead;
+    if (want <= node.size[1] + 2) {
+      lastConfirmedWant = 0;
+      return; // grow-only: nothing to do
+    }
+    if (want - node.size[1] > 120 && Math.abs(want - lastConfirmedWant) > 8) {
+      // Suspiciously large jump — wait for layout to fully settle, then
+      // re-measure. If the value survives (within a few px of the previous
+      // read — font subpixel rendering can make it oscillate by 1-2px),
+      // it's real and gets committed.
+      lastConfirmedWant = want;
+      clearTimeout(fitConfirmTimer);
+      fitConfirmTimer = setTimeout(() => {
+        fitConfirmTimer = 0;
+        fitNodeSize();
+      }, 80);
+      return;
+    }
+    lastConfirmedWant = 0;
+    node.setSize?.([node.size[0], want]);
+    node.setDirtyCanvas?.(true, true);
   };
   state.fitNodeSize = fitNodeSize;
 
@@ -598,7 +638,39 @@ function build(node) {
     state.tags = out;
   };
 
+  // NEVER put tags into the DOM until the widget container has a stable
+  // width. The frontend's arrange() (runs on every canvas draw,
+  // expandToFitContent, never shrinks) sizes the node from our
+  // getMinHeight() — i.e. from the CURRENT DOM. A transient narrow layout
+  // during workflow load/clone wraps every tag onto its own line, and that
+  // inflated measurement gets locked into the node height (the 981/2094px
+  // blow-up). With empty boxes the measured minimum stays small, so the
+  // transient has nothing to poison; tags render one frame after the width
+  // settles and everything measures correctly from then on.
+  let lastDomWidth = -1;
+  let pendingRender = null;
+  const domSettled = () => {
+    const w = root.isConnected ? root.clientWidth : 0;
+    if (!w) return false;
+    if (w !== lastDomWidth) {
+      lastDomWidth = w;
+      return false;
+    }
+    return true;
+  };
+
   state.render = (opts = {}) => {
+    if (!domSettled()) {
+      // Stop retrying once the node is gone from the graph, or the loop
+      // would spin forever on a detached element.
+      if (node.graph && !pendingRender) {
+        pendingRender = requestAnimationFrame(() => {
+          pendingRender = null;
+          state.render(opts);
+        });
+      }
+      return;
+    }
     state.original.replaceChildren();
     state.translated.replaceChildren();
 
@@ -617,7 +689,7 @@ function build(node) {
     } else {
       state.syncText();
     }
-    fitNodeSize(true);
+    fitNodeSize();
     node.setDirtyCanvas?.(true, true);
   };
 
@@ -780,7 +852,7 @@ function build(node) {
   if (node.size && node.size[0] < 420) {
     node.setSize?.([420, node.size[1]]);
   }
-  requestAnimationFrame(() => fitNodeSize(false));
+  requestAnimationFrame(() => fitNodeSize());
 }
 
 // ---- file path picker (Load Image From Path) ------------------------------
@@ -898,8 +970,9 @@ function buildPathPicker(node) {
   const preview = root.querySelector(".pte-fp-img");
   const previewBox = root.querySelector(".pte-fp-preview");
 
-  // Minimum slot: path row + gap + the 220px reserved preview area.
-  const PREVIEW_MIN = 220;
+  // Minimum slot: path row + gap + the small preview floor (48px). The
+  // preview area itself flexes with the node height above this floor.
+  const PREVIEW_MIN = 48;
   const minSlot = () => (row.offsetHeight || 28) + 5 + PREVIEW_MIN;
 
   preview.onload = () => previewBox.classList.add("has-img");
@@ -938,24 +1011,17 @@ function buildPathPicker(node) {
   input.value = String(nativePath.value ?? "");
   updatePreview();
 
-  // One-time chrome measurement (header + hidden widget + margins), same as
-  // the tag editor's overhead trick. Declared before addDOMWidget so the
-  // getHeight closure can safely reference it.
-  let overhead = 0;
-
   const widget = node.addDOMWidget?.("pte_fp_path", "PTE_FP", root, {
     serialize: false,
     hideOnZoom: false,
+    // PURE content height — never depend on node.size (see the editor
+    // widget above): any size-dependent getHeight ratchets the node taller
+    // on every clone/reload. The frontend stretches the element to the
+    // real slot anyway, so the reserved preview area flexes with the node.
     getMinHeight: () => minSlot(),
-    // Node-height-driven (same model as the tag editor): the user sets the
-    // node size, the preview refits inside. Never content-driven, or the
-    // node would fight the image and snap back while dragging.
-    getHeight: () => Math.max(minSlot(), (node.size?.[1] ?? 0) - overhead),
+    getHeight: () => minSlot(),
   });
   if (widget) widget.serialize = false;
-
-  overhead = Math.max(0,
-    ((node.computeSize?.([node.size?.[0] ?? 420, 100])?.[1] ?? 0)) - minSlot());
 
   // Same minimum width as the tag editor so the input/preview aren't cramped.
   if (node.size && node.size[0] < 420) {
