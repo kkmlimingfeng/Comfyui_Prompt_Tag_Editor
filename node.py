@@ -106,7 +106,8 @@ class PromptTagEditor(io.ComfyNode):
 
 class PromptTagEditorExtension(ComfyExtension):
     async def get_node_list(self):
-        return [PromptTagEditor, LoadImageFromPath]
+        from .reroute import MultiReroute
+        return [PromptTagEditor, LoadImageFromPath, MultiReroute]
 
 
 # ---- load image from path -------------------------------------------------
